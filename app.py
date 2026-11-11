@@ -1,128 +1,86 @@
 from dotenv import load_dotenv
-load_dotenv() ## load all the environemnt variables
+load_dotenv() ## load all the environment variables
 
-import random
-import streamlit as st
 import os
 import sqlite3
+import streamlit as st
 
 import google.generativeai as genai # type: ignore
-## Configure Genai Key
+
+## Configure Gemini key and model
 
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+DB_PATH = "students.db"
 
-## Function To Load Google Gemini Model and provide queries as response
+## Prompt: describes the real STUDENT table created by sqlite.py
 
-def get_gemini_response(question, prompts):
-    model = genai.GenerativeModel('gemini-pro')
-    selected_prompt = random.choice(prompts)
-    response = model.generate_content([selected_prompt, question])
-    # Ensure that the table name is correct in the SQL query
-    corrected_response = response.text.replace("RESULT", "STUDENT")
-    
-    return corrected_response
+prompt = """
+You are an expert in converting English questions to SQL queries for SQLite.
+The database has one table named STUDENT with these columns:
+NAME (text), SUBJECT (text), GRADE (text), MARKS (integer).
+SUBJECT is one of: 'Data Science', 'Machine Learning', 'Topics in AI',
+'Natural Language Processing', 'DEVOPS'. GRADE is one of: 'A', 'B', 'C'.
 
-## Fucntion To retrieve query from the database
+Examples:
+Question: What is the average marks of students in Machine Learning?
+SQL: SELECT AVG(MARKS) FROM STUDENT WHERE SUBJECT = 'Machine Learning';
 
-def read_sql_query(sql,db):
-    conn=sqlite3.connect(db)
-    cur=conn.cursor()
-    cur.execute(sql)
-    rows=cur.fetchall()
-    conn.commit()
-    conn.close()
-    for row in rows:
-        print(row)
-    return rows
+Question: Show me all students who have marks greater than 80.
+SQL: SELECT * FROM STUDENT WHERE MARKS > 80;
 
-## Define Your Prompt
-prompt = [
-    """
-    You are an expert in converting English questions to SQL query!
-    The SQL database has the name STUDENT and has the following columns - NAME, CLASS, SECTION, MARKS.
-    
-    For example:
-    Example 1 - What is the average marks of students in the Machine Learning class? 
-    The SQL command will be something like this: SELECT AVG(MARKS) FROM STUDENT WHERE CLASS="Machine Learning";
-    
-    Example 2 - Show me all students who have marks greater than 80. 
-    The SQL command will be something like this: SELECT * FROM STUDENT WHERE MARKS > 80;
+Question: How many students are enrolled in each subject?
+SQL: SELECT SUBJECT, COUNT(*) FROM STUDENT GROUP BY SUBJECT;
 
-    Also, the SQL code should not have ``` in the beginning or end and the word SQL should not appear in the output.
-    """,
+Return only a single SELECT statement. Do not wrap it in ``` and do not
+include the word SQL or any explanation.
+"""
 
-    """
-    You are an expert in converting English questions to SQL query!
-    The SQL database has the name STUDENT and has the following columns - NAME, CLASS, SECTION, GRADE.
-    
-    For example:
-    Example 1 - List the names of all students who have an 'A' grade. 
-    The SQL command will be something like this: SELECT NAME FROM STUDENT WHERE GRADE="A";
-    
-    Example 2 - How many students are in the DEVOPS class? 
-    The SQL command will be something like this: SELECT COUNT(*) FROM STUDENT WHERE CLASS="DEVOPS";
+## Function to get a SQL query from Gemini
 
-    Also, the SQL code should not have ``` in the beginning or end and the word SQL should not appear in the output.
-    """,
+def get_gemini_response(question):
+    model = genai.GenerativeModel(MODEL_NAME)
+    response = model.generate_content([prompt, question])
+    return response.text.strip().strip("`").strip()
 
-    """
-    You are an expert in converting English questions to SQL query!
-    The SQL database has the name STUDENT and has the following columns - NAME, SUBJECT, GRADE, MARKS.
-    
-    For example:
-    Example 1 - Retrieve the name and marks of students who scored above 90 in Data Science. 
-    The SQL command will be something like this: SELECT NAME, MARKS FROM STUDENT WHERE CLASS="Data Science" AND MARKS > 90;
-    
-    Example 2 - Show the details of all students sorted by their marks in descending order. 
-    The SQL command will be something like this: SELECT * FROM STUDENT ORDER BY MARKS DESC;
+## Function to check the query is a single read-only SELECT
 
-    Also, the SQL code should not have ``` in the beginning or end and the word SQL should not appear in the output.
-    """,
+def is_safe_select(sql):
+    statement = sql.strip().rstrip(";").strip()
+    return statement.upper().startswith("SELECT") and ";" not in statement
 
-    """
-    You are an expert in converting English questions to SQL query!
-    The SQL database has the name STUDENT and has the following columns - NAME, SUBJECT, GRADE, MARKS.
-    
-    For example:
-    Example 1 - Find out how many students are enrolled in each subject. 
-    The SQL command will be something like this: SELECT SUBJECT, COUNT(*) FROM STUDENT GROUP BY SUBJECT;
-    
-    Example 2 - List the names of students who have 'B' grade in Natural Language Processing. 
-    The SQL command will be something like this: SELECT NAME FROM STUDENT WHERE SUBJECT="Natural Language Processing" AND GRADE="B";
+## Function to run the query against a read-only connection
 
-    Also, the SQL code should not have ``` in the beginning or end and the word SQL should not appear in the output.
-    """,
-
-    """
-    You are an expert in converting English questions to SQL query!
-    The SQL database has the name STUDENT and has the following columns - NAME, CLASS, SECTION, MARKS.
-    
-    For example:
-    Example 1 - What are the names of students in section 'A'? 
-    The SQL command will be something like this: SELECT NAME FROM STUDENT WHERE SECTION="A";
-    
-    Example 2 - Retrieve all records where the marks are between 70 and 90. 
-    The SQL command will be something like this: SELECT * FROM STUDENT WHERE MARKS BETWEEN 70 AND 90;
-
-    Also, the SQL code should not have ``` in the beginning or end and the word SQL should not appear in the output.
-    """
-]
+def read_sql_query(sql, db):
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        columns = [col[0] for col in cur.description]
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    return columns, rows
 
 ## Streamlit App
 
-st.set_page_config(page_title="Retrieve SQL query")
-st.header("Gemini App To Retrieve SQL Data")
+st.set_page_config(page_title="Text-to-SQL")
+st.header("Ask Your Database in Plain English")
 
-question=st.text_input("Input: ",key="input")
+question = st.text_input("Question: ", key="input")
+submit = st.button("Ask the question")
 
-submit=st.button("Ask the question")
+if submit and question:
+    sql = get_gemini_response(question)
+    st.subheader("Generated SQL")
+    st.code(sql, language="sql")
 
-# if submit is clicked
-if submit:
-    response=get_gemini_response(question,prompt)
-    print(response)
-    response=read_sql_query(response,"students.db")
-    st.subheader("The Response is")
-    for row in response:
-        print(row)
-        st.header(row)
+    if not is_safe_select(sql):
+        st.error("Only single, read-only SELECT queries are allowed.")
+    else:
+        try:
+            columns, rows = read_sql_query(sql, DB_PATH)
+            st.subheader("Result")
+            st.dataframe([dict(zip(columns, row)) for row in rows])
+        except sqlite3.Error as e:
+            st.error(f"The query failed: {e}")
